@@ -48,20 +48,50 @@ def test_safe_mutable_bytes():
     view[:] = b'\x00' * buffer_size
 
 
-def test_never_mutate_singleton_bytes():
-    for i in range(256):
-        if sys.version_info[0] >= 3:
-            buffer_holder = [bytes([i])]
-        else:
-            buffer_holder = [chr(i)]
-        assert not _is_safe_to_mutate(buffer_holder)
+@pytest.mark.skipif(sys.version_info[0] < 3 or not RUNNING_CPYTHON,
+                    reason="Test relies on CPython 3 implementation details")
+def test_mutate_py3_singleton_bytes():
+    """This test is a canary test for future Python 3 versions
+
+    The _memoryview_from_bytes make some assumptions on implementation details
+    of the CPython 3 interpreter.
+
+    In particular it assumes that when a singleton bytes instance is implicitly
+    interned, it has always at least one external reference somewhere else in
+    the interpreter and the _safe_to_mutate will return False.
+
+    If those assumptions are ever violated in some future version of CPython,
+    this test will fail and will tell the cloudpickle maintainers that safety
+    of mutating singleton bytes is no longer guaranteed.
+    """
+    # Single item bytes can be singleton (implicitly interned), for instance
+    # when they are sliced from a large bytes object.
+    joined_bytes = bytes(range(255))
+    for i in range(255):
+        assert sys.getrefcount(joined_bytes[i:i + 1]) >= 3
+        assert not _is_safe_to_mutate([joined_bytes[i:i + 1]])
 
         # In this case, a new read-write buffer is allocated to back the
         # memoryview.
-        view = _memoryview_from_bytes(buffer_holder, 'B', False, (1,))
+        view = _memoryview_from_bytes([joined_bytes[i:i + 1]], 'B', False, (1,))
         assert not view.readonly
         if hasattr(view, 'obj'):
             assert not hasattr(view.obj, '_hidden_buffer_ref')
+
+    # Single item bytes instances are not interned when using the bytes([i])
+    # constructor and this case, they can be mutated safely, they will not
+    # impact the implicitly interned bytes singleton instances.
+    for i in range(256):
+        if sys.version_info[0] >= 3:
+            buffer_holder = [bytes([i])]
+        assert _is_safe_to_mutate(buffer_holder)
+        assert buffer_holder[0] is not joined_bytes[i:i + 1]
+        view = _memoryview_from_bytes(buffer_holder, 'B', False, (1,))
+        view[:] = bytes([(i + 1) % 256])
+        assert view.tobytes() == bytes([(i + 1) % 256])
+
+        # The singleton are not impacted
+        assert joined_bytes[i:i + 1] == bytes([i])
 
 
 def test_unsafe_mutable_bytes_with_external_references():
